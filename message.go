@@ -19,6 +19,8 @@ const (
 	CompressionZSTD   CompressionCodec = 4
 )
 
+const timestampTypeMask = 0x08
+
 func (cc CompressionCodec) String() string {
 	return []string{
 		"none",

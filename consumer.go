@@ -519,13 +519,17 @@ func (child *partitionConsumer) parseRecords(batch *RecordBatch) ([]*ConsumerMes
 		if offset < child.offset {
 			continue
 		}
+		timestamp := batch.FirstTimestamp.Add(rec.TimestampDelta)
+		if batch.LogAppendTime {
+			timestamp = batch.MaxTimestamp
+		}
 		messages = append(messages, &ConsumerMessage{
 			Topic:     child.topic,
 			Partition: child.partition,
 			Key:       rec.Key,
 			Value:     rec.Value,
 			Offset:    offset,
-			Timestamp: batch.FirstTimestamp.Add(rec.TimestampDelta),
+			Timestamp: timestamp,
 			Headers:   rec.Headers,
 		})
 		child.offset = offset + 1
