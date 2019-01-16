@@ -17,14 +17,15 @@ type CompressionCodec int8
 // only the last two bits are really used
 const compressionCodecMask int8 = 0x03
 
+// Bit 3 set for "LogAppend" timestamps
+const timestampTypeMask = 0x08
+
 const (
 	CompressionNone   CompressionCodec = 0
 	CompressionGZIP   CompressionCodec = 1
 	CompressionSnappy CompressionCodec = 2
 	CompressionLZ4    CompressionCodec = 3
 )
-
-const timestampTypeMask = 0x08
 
 func (cc CompressionCodec) String() string {
 	return []string{
@@ -60,6 +61,9 @@ func (m *Message) encode(pe packetEncoder) error {
 	pe.putInt8(m.Version)
 
 	attributes := int8(m.Codec) & compressionCodecMask
+	if m.LogAppendTime {
+		attributes |= timestampTypeMask
+	}
 	pe.putInt8(attributes)
 
 	if m.Version >= 1 {
