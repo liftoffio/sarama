@@ -24,6 +24,8 @@ const (
 	CompressionLZ4    CompressionCodec = 3
 )
 
+const timestampTypeMask = 0x08
+
 func (cc CompressionCodec) String() string {
 	return []string{
 		"none",
@@ -41,6 +43,7 @@ const CompressionLevelDefault = -1000
 type Message struct {
 	Codec            CompressionCodec // codec used to compress the message contents
 	CompressionLevel int              // compression level
+	LogAppendTime    bool             // the used timestamp is LogAppendTime
 	Key              []byte           // the message key, may be nil
 	Value            []byte           // the message contents
 	Set              *MessageSet      // the message set a message might wrap
@@ -148,6 +151,7 @@ func (m *Message) decode(pd packetDecoder) (err error) {
 		return err
 	}
 	m.Codec = CompressionCodec(attribute & compressionCodecMask)
+	m.LogAppendTime = attribute&timestampTypeMask == timestampTypeMask
 
 	if m.Version == 1 {
 		if err := (Timestamp{&m.Timestamp}).decode(pd); err != nil {
