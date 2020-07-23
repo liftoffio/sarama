@@ -10,6 +10,5 @@ const (
 	AnyResource     ConfigResourceType = 1
 	TopicResource   ConfigResourceType = 2
 	GroupResource   ConfigResourceType = 3
-	ClusterResource ConfigResourceType = 4
-	BrokerResource  ConfigResourceType = 5
+	BrokerResource  ConfigResourceType = 4
 )
