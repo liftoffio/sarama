@@ -157,12 +157,13 @@ func (c *consumer) ConsumePartition(topic string, partition int32, offset int64)
 	}
 
 	ctx := context.Background()
-	l := fmt.Sprintf("sarama-dispatcher-%s-%d", topic, partition)
-	go pprof.Do(ctx, pprof.Labels(l), func(context.Context) {
+	labels := pprof.Labels(
+		"topic", topic,
+		"partition", fmt.Sprint(partition))
+	go pprof.Do(ctx, labels, func(context.Context) {
 		withRecover(child.dispatcher)
 	})
-	l = fmt.Sprintf("sarama-feeder-%s-%d", topic, partition)
-	go pprof.Do(ctx, pprof.Labels(l), func(context.Context) {
+	go pprof.Do(ctx, labels, func(context.Context) {
 		withRecover(child.responseFeeder)
 	})
 
@@ -728,12 +729,13 @@ func (c *consumer) newBrokerConsumer(broker *Broker) *brokerConsumer {
 	}
 
 	ctx := context.Background()
-	l := fmt.Sprintf("sarama-subscription-manager-%s-%d", broker.addr, broker.id)
-	go pprof.Do(ctx, pprof.Labels(l), func(context.Context) {
+	labels := pprof.Labels(
+		"broker-addr", broker.addr,
+		"broker-id", fmt.Sprint(broker.id))
+	go pprof.Do(ctx, labels, func(context.Context) {
 		withRecover(bc.subscriptionManager)
 	})
-	l = fmt.Sprintf("sarama-subscription-consumer-%s-%d", broker.addr, broker.id)
-	go pprof.Do(ctx, pprof.Labels(l), func(context.Context) {
+	go pprof.Do(ctx, labels, func(context.Context) {
 		withRecover(bc.subscriptionConsumer)
 	})
 
