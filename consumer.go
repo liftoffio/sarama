@@ -1,9 +1,11 @@
 package sarama
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
+	"runtime/pprof"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -154,8 +156,15 @@ func (c *consumer) ConsumePartition(topic string, partition int32, offset int64)
 		return nil, err
 	}
 
-	go withRecover(child.dispatcher)
-	go withRecover(child.responseFeeder)
+	ctx := context.Background()
+	l := fmt.Sprintf("sarama-dispatcher-%s-%d", topic, partition)
+	go pprof.Do(ctx, pprof.Labels(l), func(context.Context) {
+		withRecover(child.dispatcher)
+	})
+	l = fmt.Sprintf("sarama-feeder-%s-%d", topic, partition)
+	go pprof.Do(ctx, pprof.Labels(l), func(context.Context) {
+		withRecover(child.responseFeeder)
+	})
 
 	child.broker = c.refBrokerConsumer(leader)
 	child.broker.input <- child
@@ -718,8 +727,15 @@ func (c *consumer) newBrokerConsumer(broker *Broker) *brokerConsumer {
 		refs:             0,
 	}
 
-	go withRecover(bc.subscriptionManager)
-	go withRecover(bc.subscriptionConsumer)
+	ctx := context.Background()
+	l := fmt.Sprintf("sarama-subscription-manager-%s-%d", broker.addr, broker.id)
+	go pprof.Do(ctx, pprof.Labels(l), func(context.Context) {
+		withRecover(bc.subscriptionManager)
+	})
+	l = fmt.Sprintf("sarama-subscription-consumer-%s-%d", broker.addr, broker.id)
+	go pprof.Do(ctx, pprof.Labels(l), func(context.Context) {
+		withRecover(bc.subscriptionConsumer)
+	})
 
 	return bc
 }
