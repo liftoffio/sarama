@@ -160,11 +160,11 @@ func (c *consumer) ConsumePartition(topic string, partition int32, offset int64)
 	labels := pprof.Labels(
 		"topic", topic,
 		"partition", fmt.Sprint(partition))
-	go pprof.Do(ctx, labels, func(context.Context) {
-		withRecover(child.dispatcher)
+	pprof.Do(ctx, labels, func(context.Context) {
+		go withRecover(child.dispatcher)
 	})
-	go pprof.Do(ctx, labels, func(context.Context) {
-		withRecover(child.responseFeeder)
+	pprof.Do(ctx, labels, func(context.Context) {
+		go withRecover(child.responseFeeder)
 	})
 
 	child.broker = c.refBrokerConsumer(leader)
@@ -732,11 +732,11 @@ func (c *consumer) newBrokerConsumer(broker *Broker) *brokerConsumer {
 	labels := pprof.Labels(
 		"broker-addr", broker.addr,
 		"broker-id", fmt.Sprint(broker.id))
-	go pprof.Do(ctx, labels, func(context.Context) {
-		withRecover(bc.subscriptionManager)
+	pprof.Do(ctx, labels, func(context.Context) {
+		go withRecover(bc.subscriptionManager)
 	})
-	go pprof.Do(ctx, labels, func(context.Context) {
-		withRecover(bc.subscriptionConsumer)
+	pprof.Do(ctx, labels, func(context.Context) {
+		go withRecover(bc.subscriptionConsumer)
 	})
 
 	return bc
