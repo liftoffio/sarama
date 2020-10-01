@@ -1,6 +1,7 @@
 package sarama
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -154,8 +155,13 @@ func (c *consumer) ConsumePartition(topic string, partition int32, offset int64)
 		return nil, err
 	}
 
-	go withRecover(child.dispatcher)
-	go withRecover(child.responseFeeder)
+	ctx := context.Background()
+	go withPartitionLabels(ctx, topic, partition, func(context.Context) {
+		withRecover(child.dispatcher)
+	})
+	go withPartitionLabels(ctx, topic, partition, func(context.Context) {
+		withRecover(child.responseFeeder)
+	})
 
 	child.broker = c.refBrokerConsumer(leader)
 	child.broker.input <- child
@@ -718,8 +724,15 @@ func (c *consumer) newBrokerConsumer(broker *Broker) *brokerConsumer {
 		refs:             0,
 	}
 
-	go withRecover(bc.subscriptionManager)
-	go withRecover(bc.subscriptionConsumer)
+	ctx := context.Background()
+	go withBrokerLabels(ctx, broker, func(context.Context) {
+		withRecover(bc.subscriptionManager)
+	})
+	go withBrokerLabels(ctx, broker, func(ctx context.Context) {
+		withRecover(func() {
+			bc.subscriptionConsumer(ctx)
+		})
+	})
 
 	return bc
 }
@@ -765,7 +778,7 @@ done:
 }
 
 //subscriptionConsumer ensures we will get nil right away if no new subscriptions is available
-func (bc *brokerConsumer) subscriptionConsumer() {
+func (bc *brokerConsumer) subscriptionConsumer(ctx context.Context) {
 	<-bc.wait // wait for our first piece of work
 
 	for newSubscriptions := range bc.newSubscriptions {
@@ -788,7 +801,9 @@ func (bc *brokerConsumer) subscriptionConsumer() {
 
 		bc.acks.Add(len(bc.subscriptions))
 		for child := range bc.subscriptions {
-			child.feeder <- response
+			withPartitionLabels(ctx, child.topic, child.partition, func(context.Context) {
+				child.feeder <- response
+			})
 		}
 		bc.acks.Wait()
 		bc.handleResponses()
