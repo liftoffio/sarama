@@ -2,9 +2,11 @@ package sarama
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"net"
 	"regexp"
+	"runtime/pprof"
 )
 
 type none struct{}
@@ -41,6 +43,35 @@ func withRecover(fn func()) {
 	}()
 
 	fn()
+}
+
+func withBrokerLabels(broker *Broker, f func()) {
+	ctx := context.Background()
+	labels := pprof.Labels(
+		"broker-addr", broker.addr,
+		"broker-id", fmt.Sprint(broker.id))
+	pprof.Do(ctx, labels, func(context.Context) {
+		f()
+	})
+}
+
+func withTopicLabel(topic string, f func()) {
+	ctx := context.Background()
+	labels := pprof.Labels(
+		"topic", topic)
+	pprof.Do(ctx, labels, func(context.Context) {
+		f()
+	})
+}
+
+func withPartitionLabels(topic string, partition int32, f func()) {
+	ctx := context.Background()
+	labels := pprof.Labels(
+		"topic", topic,
+		"partition", fmt.Sprint(partition))
+	pprof.Do(ctx, labels, func(context.Context) {
+		f()
+	})
 }
 
 func safeAsyncClose(b *Broker) {

@@ -400,7 +400,9 @@ func (p *asyncProducer) newTopicProducer(topic string) chan<- *ProducerMessage {
 		handlers:    make(map[int32]chan<- *ProducerMessage),
 		partitioner: p.conf.Producer.Partitioner(topic),
 	}
-	go withRecover(tp.dispatch)
+	withTopicLabel(topic, func() {
+		go withRecover(tp.dispatch)
+	})
 	return input
 }
 
@@ -506,7 +508,9 @@ func (p *asyncProducer) newPartitionProducer(topic string, partition int32) chan
 		breaker:    breaker.New(3, 1, 10*time.Second),
 		retryState: make([]partitionRetryState, p.conf.Producer.Retry.Max+1),
 	}
-	go withRecover(pp.dispatch)
+	withPartitionLabels(topic, partition, func() {
+		go withRecover(pp.dispatch)
+	})
 	return input
 }
 
@@ -684,22 +688,26 @@ func (p *asyncProducer) newBrokerProducer(broker *Broker) *brokerProducer {
 		buffer:         newProduceSet(p),
 		currentRetries: make(map[string]map[int32]error),
 	}
-	go withRecover(bp.run)
+	withBrokerLabels(broker, func() {
+		go withRecover(bp.run)
+	})
 
 	// minimal bridge to make the network response `select`able
-	go withRecover(func() {
-		for set := range bridge {
-			request := set.buildRequest()
+	withBrokerLabels(broker, func() {
+		go withRecover(func() {
+			for set := range bridge {
+				request := set.buildRequest()
 
-			response, err := broker.Produce(request)
+				response, err := broker.Produce(request)
 
-			responses <- &brokerProducerResponse{
-				set: set,
-				err: err,
-				res: response,
+				responses <- &brokerProducerResponse{
+					set: set,
+					err: err,
+					res: response,
+				}
 			}
-		}
-		close(responses)
+			close(responses)
+		})
 	})
 
 	if p.conf.Producer.Retry.Max <= 0 {
@@ -888,49 +896,51 @@ func (bp *brokerProducer) handleSuccess(sent *produceSet, response *ProduceRespo
 	// if the response is missing a block completely
 	var retryTopics []string
 	sent.eachPartition(func(topic string, partition int32, pSet *partitionSet) {
-		if response == nil {
-			// this only happens when RequiredAcks is NoResponse, so we have to assume success
-			bp.parent.returnSuccesses(pSet.msgs)
-			return
-		}
+		withPartitionLabels(topic, partition, func() {
+			if response == nil {
+				// this only happens when RequiredAcks is NoResponse, so we have to assume success
+				bp.parent.returnSuccesses(pSet.msgs)
+				return
+			}
 
-		block := response.GetBlock(topic, partition)
-		if block == nil {
-			bp.parent.returnErrors(pSet.msgs, ErrIncompleteResponse)
-			return
-		}
+			block := response.GetBlock(topic, partition)
+			if block == nil {
+				bp.parent.returnErrors(pSet.msgs, ErrIncompleteResponse)
+				return
+			}
 
-		switch block.Err {
-		// Success
-		case ErrNoError:
-			if bp.parent.conf.Version.IsAtLeast(V0_10_0_0) && !block.Timestamp.IsZero() {
-				for _, msg := range pSet.msgs {
-					msg.Timestamp = block.Timestamp
+			switch block.Err {
+			// Success
+			case ErrNoError:
+				if bp.parent.conf.Version.IsAtLeast(V0_10_0_0) && !block.Timestamp.IsZero() {
+					for _, msg := range pSet.msgs {
+						msg.Timestamp = block.Timestamp
+					}
 				}
-			}
-			for i, msg := range pSet.msgs {
-				msg.Offset = block.Offset + int64(i)
-			}
-			bp.parent.returnSuccesses(pSet.msgs)
-		// Duplicate
-		case ErrDuplicateSequenceNumber:
-			bp.parent.returnSuccesses(pSet.msgs)
-		// Retriable errors
-		case ErrInvalidMessage, ErrUnknownTopicOrPartition, ErrLeaderNotAvailable, ErrNotLeaderForPartition,
-			ErrRequestTimedOut, ErrNotEnoughReplicas, ErrNotEnoughReplicasAfterAppend:
-			if bp.parent.conf.Producer.Retry.Max <= 0 {
-				bp.parent.abandonBrokerConnection(bp.broker)
+				for i, msg := range pSet.msgs {
+					msg.Offset = block.Offset + int64(i)
+				}
+				bp.parent.returnSuccesses(pSet.msgs)
+			// Duplicate
+			case ErrDuplicateSequenceNumber:
+				bp.parent.returnSuccesses(pSet.msgs)
+			// Retriable errors
+			case ErrInvalidMessage, ErrUnknownTopicOrPartition, ErrLeaderNotAvailable, ErrNotLeaderForPartition,
+				ErrRequestTimedOut, ErrNotEnoughReplicas, ErrNotEnoughReplicasAfterAppend:
+				if bp.parent.conf.Producer.Retry.Max <= 0 {
+					bp.parent.abandonBrokerConnection(bp.broker)
+					bp.parent.returnErrors(pSet.msgs, block.Err)
+				} else {
+					retryTopics = append(retryTopics, topic)
+				}
+			// Other non-retriable errors
+			default:
+				if bp.parent.conf.Producer.Retry.Max <= 0 {
+					bp.parent.abandonBrokerConnection(bp.broker)
+				}
 				bp.parent.returnErrors(pSet.msgs, block.Err)
-			} else {
-				retryTopics = append(retryTopics, topic)
 			}
-		// Other non-retriable errors
-		default:
-			if bp.parent.conf.Producer.Retry.Max <= 0 {
-				bp.parent.abandonBrokerConnection(bp.broker)
-			}
-			bp.parent.returnErrors(pSet.msgs, block.Err)
-		}
+		})
 	})
 
 	if len(retryTopics) > 0 {
@@ -942,29 +952,31 @@ func (bp *brokerProducer) handleSuccess(sent *produceSet, response *ProduceRespo
 		}
 
 		sent.eachPartition(func(topic string, partition int32, pSet *partitionSet) {
-			block := response.GetBlock(topic, partition)
-			if block == nil {
-				// handled in the previous "eachPartition" loop
-				return
-			}
+			withPartitionLabels(topic, partition, func() {
+				block := response.GetBlock(topic, partition)
+				if block == nil {
+					// handled in the previous "eachPartition" loop
+					return
+				}
 
-			switch block.Err {
-			case ErrInvalidMessage, ErrUnknownTopicOrPartition, ErrLeaderNotAvailable, ErrNotLeaderForPartition,
-				ErrRequestTimedOut, ErrNotEnoughReplicas, ErrNotEnoughReplicasAfterAppend:
-				Logger.Printf("producer/broker/%d state change to [retrying] on %s/%d because %v\n",
-					bp.broker.ID(), topic, partition, block.Err)
-				if bp.currentRetries[topic] == nil {
-					bp.currentRetries[topic] = make(map[int32]error)
+				switch block.Err {
+				case ErrInvalidMessage, ErrUnknownTopicOrPartition, ErrLeaderNotAvailable, ErrNotLeaderForPartition,
+					ErrRequestTimedOut, ErrNotEnoughReplicas, ErrNotEnoughReplicasAfterAppend:
+					Logger.Printf("producer/broker/%d state change to [retrying] on %s/%d because %v\n",
+						bp.broker.ID(), topic, partition, block.Err)
+					if bp.currentRetries[topic] == nil {
+						bp.currentRetries[topic] = make(map[int32]error)
+					}
+					bp.currentRetries[topic][partition] = block.Err
+					if bp.parent.conf.Producer.Idempotent {
+						go bp.parent.retryBatch(topic, partition, pSet, block.Err)
+					} else {
+						bp.parent.retryMessages(pSet.msgs, block.Err)
+					}
+					// dropping the following messages has the side effect of incrementing their retry count
+					bp.parent.retryMessages(bp.buffer.dropPartition(topic, partition), block.Err)
 				}
-				bp.currentRetries[topic][partition] = block.Err
-				if bp.parent.conf.Producer.Idempotent {
-					go bp.parent.retryBatch(topic, partition, pSet, block.Err)
-				} else {
-					bp.parent.retryMessages(pSet.msgs, block.Err)
-				}
-				// dropping the following messages has the side effect of incrementing their retry count
-				bp.parent.retryMessages(bp.buffer.dropPartition(topic, partition), block.Err)
-			}
+			})
 		})
 	}
 }

@@ -1,11 +1,9 @@
 package sarama
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"math"
-	"runtime/pprof"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -156,14 +154,10 @@ func (c *consumer) ConsumePartition(topic string, partition int32, offset int64)
 		return nil, err
 	}
 
-	ctx := context.Background()
-	labels := pprof.Labels(
-		"topic", topic,
-		"partition", fmt.Sprint(partition))
-	pprof.Do(ctx, labels, func(context.Context) {
+	withPartitionLabels(topic, partition, func() {
 		go withRecover(child.dispatcher)
 	})
-	pprof.Do(ctx, labels, func(context.Context) {
+	withPartitionLabels(topic, partition, func() {
 		go withRecover(child.responseFeeder)
 	})
 
@@ -728,14 +722,10 @@ func (c *consumer) newBrokerConsumer(broker *Broker) *brokerConsumer {
 		refs:             0,
 	}
 
-	ctx := context.Background()
-	labels := pprof.Labels(
-		"broker-addr", broker.addr,
-		"broker-id", fmt.Sprint(broker.id))
-	pprof.Do(ctx, labels, func(context.Context) {
+	withBrokerLabels(broker, func() {
 		go withRecover(bc.subscriptionManager)
 	})
-	pprof.Do(ctx, labels, func(context.Context) {
+	withBrokerLabels(broker, func() {
 		go withRecover(bc.subscriptionConsumer)
 	})
 
@@ -806,7 +796,9 @@ func (bc *brokerConsumer) subscriptionConsumer() {
 
 		bc.acks.Add(len(bc.subscriptions))
 		for child := range bc.subscriptions {
-			child.feeder <- response
+			withPartitionLabels(child.topic, child.partition, func() {
+				child.feeder <- response
+			})
 		}
 		bc.acks.Wait()
 		bc.handleResponses()
