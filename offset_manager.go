@@ -1,6 +1,7 @@
 package sarama
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -48,10 +49,10 @@ type offsetManager struct {
 // NewOffsetManagerFromClient creates a new OffsetManager from the given client.
 // It is still necessary to call Close() on the underlying client when finished with the partition manager.
 func NewOffsetManagerFromClient(group string, client Client) (OffsetManager, error) {
-	return newOffsetManagerFromClient(group, "", GroupGenerationUndefined, client)
+	return newOffsetManagerFromClient(context.Background(), group, "", GroupGenerationUndefined, client)
 }
 
-func newOffsetManagerFromClient(group, memberID string, generation int32, client Client) (*offsetManager, error) {
+func newOffsetManagerFromClient(ctx context.Context, group, memberID string, generation int32, client Client) (*offsetManager, error) {
 	// Check that we are not dealing with a closed Client before processing any other arguments
 	if client.Closed() {
 		return nil, ErrClosedClient
@@ -72,7 +73,7 @@ func newOffsetManagerFromClient(group, memberID string, generation int32, client
 	}
 	if conf.Consumer.Offsets.AutoCommit.Enable {
 		om.ticker = time.NewTicker(conf.Consumer.Offsets.AutoCommit.Interval)
-		go withRecover(om.mainLoop)
+		go withRecover(ctx, om.mainLoop)
 	}
 
 	return om, nil
@@ -226,7 +227,7 @@ func (om *offsetManager) releaseCoordinator(b *Broker) {
 	om.brokerLock.Unlock()
 }
 
-func (om *offsetManager) mainLoop() {
+func (om *offsetManager) mainLoop(context.Context) {
 	defer om.ticker.Stop()
 	defer close(om.closed)
 

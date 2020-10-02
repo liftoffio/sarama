@@ -32,7 +32,7 @@ func dupInt32Slice(input []int32) []int32 {
 	return ret
 }
 
-func withRecover(fn func()) {
+func withRecover(ctx context.Context, fn func(context.Context)) {
 	defer func() {
 		handler := PanicHandler
 		if handler != nil {
@@ -42,41 +42,38 @@ func withRecover(fn func()) {
 		}
 	}()
 
-	fn()
+	fn(ctx)
 }
 
-func withBrokerLabels(broker *Broker, f func()) {
-	ctx := context.Background()
+func withBrokerLabels(ctx context.Context, broker *Broker, f func(context.Context)) {
 	labels := pprof.Labels(
 		"broker-addr", broker.addr,
 		"broker-id", fmt.Sprint(broker.id))
 	pprof.Do(ctx, labels, func(context.Context) {
-		f()
+		f(ctx)
 	})
 }
 
-func withTopicLabel(topic string, f func()) {
-	ctx := context.Background()
+func withTopicLabel(ctx context.Context, topic string, f func(context.Context)) {
 	labels := pprof.Labels(
 		"topic", topic)
 	pprof.Do(ctx, labels, func(context.Context) {
-		f()
+		f(ctx)
 	})
 }
 
-func withPartitionLabels(topic string, partition int32, f func()) {
-	ctx := context.Background()
+func withPartitionLabels(ctx context.Context, topic string, partition int32, f func(ctx context.Context)) {
 	labels := pprof.Labels(
 		"topic", topic,
 		"partition", fmt.Sprint(partition))
 	pprof.Do(ctx, labels, func(context.Context) {
-		f()
+		f(ctx)
 	})
 }
 
-func safeAsyncClose(b *Broker) {
+func safeAsyncClose(ctx context.Context, b *Broker) {
 	tmp := b // local var prevents clobbering in goroutine
-	go withRecover(func() {
+	go withRecover(ctx, func(context.Context) {
 		if connected, _ := tmp.Connected(); connected {
 			if err := tmp.Close(); err != nil {
 				Logger.Println("Error closing broker", tmp.ID(), ":", err)

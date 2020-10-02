@@ -1,6 +1,7 @@
 package sarama
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/binary"
 	"fmt"
@@ -151,7 +152,7 @@ func (b *Broker) Open(conf *Config) error {
 
 	b.lock.Lock()
 
-	go withRecover(func() {
+	go withRecover(context.Background(), func(ctx context.Context) {
 		defer b.lock.Unlock()
 
 		dialer := conf.getDialer()
@@ -208,7 +209,7 @@ func (b *Broker) Open(conf *Config) error {
 		} else {
 			Logger.Printf("Connected to broker at %s (unregistered)\n", b.addr)
 		}
-		go withRecover(b.responseReceiver)
+		go withRecover(ctx, b.responseReceiver)
 	})
 
 	return nil
@@ -840,7 +841,7 @@ func (b *Broker) encode(pe packetEncoder, version int16) (err error) {
 	return nil
 }
 
-func (b *Broker) responseReceiver() {
+func (b *Broker) responseReceiver(context.Context) {
 	var dead error
 
 	for response := range b.responses {

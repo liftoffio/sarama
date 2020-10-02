@@ -550,7 +550,7 @@ type consumerGroupSession struct {
 
 func newConsumerGroupSession(ctx context.Context, parent *consumerGroup, claims map[string][]int32, memberID string, generationID int32, handler ConsumerGroupHandler) (*consumerGroupSession, error) {
 	// init offset manager
-	offsets, err := newOffsetManagerFromClient(parent.groupID, memberID, generationID, parent.client)
+	offsets, err := newOffsetManagerFromClient(ctx, parent.groupID, memberID, generationID, parent.client)
 	if err != nil {
 		return nil, err
 	}

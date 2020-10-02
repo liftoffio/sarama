@@ -1,6 +1,9 @@
 package sarama
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
 // SyncProducer publishes Kafka messages, blocking until they have been acknowledged. It routes messages to the correct
 // broker, refreshing metadata as appropriate, and parses responses for errors. You must call Close() on a producer
@@ -52,7 +55,7 @@ func NewSyncProducer(addrs []string, config *Config) (SyncProducer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newSyncProducerFromAsyncProducer(p.(*asyncProducer)), nil
+	return newSyncProducerFromAsyncProducer(context.Background(), p.(*asyncProducer)), nil
 }
 
 // NewSyncProducerFromClient creates a new SyncProducer using the given client. It is still
@@ -66,15 +69,15 @@ func NewSyncProducerFromClient(client Client) (SyncProducer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newSyncProducerFromAsyncProducer(p.(*asyncProducer)), nil
+	return newSyncProducerFromAsyncProducer(context.Background(), p.(*asyncProducer)), nil
 }
 
-func newSyncProducerFromAsyncProducer(p *asyncProducer) *syncProducer {
+func newSyncProducerFromAsyncProducer(ctx context.Context, p *asyncProducer) *syncProducer {
 	sp := &syncProducer{producer: p}
 
 	sp.wg.Add(2)
-	go withRecover(sp.handleSuccesses)
-	go withRecover(sp.handleErrors)
+	go withRecover(ctx, sp.handleSuccesses)
+	go withRecover(ctx, sp.handleErrors)
 
 	return sp
 }
@@ -126,7 +129,7 @@ func (sp *syncProducer) SendMessages(msgs []*ProducerMessage) error {
 	return nil
 }
 
-func (sp *syncProducer) handleSuccesses() {
+func (sp *syncProducer) handleSuccesses(context.Context) {
 	defer sp.wg.Done()
 	for msg := range sp.producer.Successes() {
 		expectation := msg.expectation
@@ -134,7 +137,7 @@ func (sp *syncProducer) handleSuccesses() {
 	}
 }
 
-func (sp *syncProducer) handleErrors() {
+func (sp *syncProducer) handleErrors(context.Context) {
 	defer sp.wg.Done()
 	for err := range sp.producer.Errors() {
 		expectation := err.Msg.expectation

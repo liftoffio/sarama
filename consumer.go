@@ -1,6 +1,7 @@
 package sarama
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -154,11 +155,12 @@ func (c *consumer) ConsumePartition(topic string, partition int32, offset int64)
 		return nil, err
 	}
 
-	withPartitionLabels(topic, partition, func() {
-		go withRecover(child.dispatcher)
+	ctx := context.Background()
+	withPartitionLabels(ctx, topic, partition, func(ctx context.Context) {
+		go withRecover(ctx, child.dispatcher)
 	})
-	withPartitionLabels(topic, partition, func() {
-		go withRecover(child.responseFeeder)
+	withPartitionLabels(ctx, topic, partition, func(ctx context.Context) {
+		go withRecover(ctx, child.responseFeeder)
 	})
 
 	child.broker = c.refBrokerConsumer(leader)
@@ -337,7 +339,7 @@ func (child *partitionConsumer) computeBackoff() time.Duration {
 	return child.conf.Consumer.Retry.Backoff
 }
 
-func (child *partitionConsumer) dispatcher() {
+func (child *partitionConsumer) dispatcher(context.Context) {
 	for range child.trigger {
 		select {
 		case <-child.dying:
@@ -441,7 +443,7 @@ func (child *partitionConsumer) HighWaterMarkOffset() int64 {
 	return atomic.LoadInt64(&child.highWaterMarkOffset)
 }
 
-func (child *partitionConsumer) responseFeeder() {
+func (child *partitionConsumer) responseFeeder(context.Context) {
 	var msgs []*ConsumerMessage
 	expiryTicker := time.NewTicker(child.conf.Consumer.MaxProcessingTime)
 	firstAttempt := true
@@ -722,11 +724,12 @@ func (c *consumer) newBrokerConsumer(broker *Broker) *brokerConsumer {
 		refs:             0,
 	}
 
-	withBrokerLabels(broker, func() {
-		go withRecover(bc.subscriptionManager)
+	ctx := context.Background()
+	withBrokerLabels(ctx, broker, func(ctx context.Context) {
+		go withRecover(ctx, bc.subscriptionManager)
 	})
-	withBrokerLabels(broker, func() {
-		go withRecover(bc.subscriptionConsumer)
+	withBrokerLabels(ctx, broker, func(ctx context.Context) {
+		go withRecover(ctx, bc.subscriptionConsumer)
 	})
 
 	return bc
@@ -737,7 +740,7 @@ func (c *consumer) newBrokerConsumer(broker *Broker) *brokerConsumer {
 // up a batch of new subscriptions between every network request by reading from `newSubscriptions`, so we give
 // it nil if no new subscriptions are available. We also write to `wait` only when new subscriptions is available,
 // so the main goroutine can block waiting for work if it has none.
-func (bc *brokerConsumer) subscriptionManager() {
+func (bc *brokerConsumer) subscriptionManager(context.Context) {
 	var buffer []*partitionConsumer
 
 	for {
@@ -773,7 +776,7 @@ done:
 }
 
 //subscriptionConsumer ensures we will get nil right away if no new subscriptions is available
-func (bc *brokerConsumer) subscriptionConsumer() {
+func (bc *brokerConsumer) subscriptionConsumer(ctx context.Context) {
 	<-bc.wait // wait for our first piece of work
 
 	for newSubscriptions := range bc.newSubscriptions {
@@ -796,7 +799,7 @@ func (bc *brokerConsumer) subscriptionConsumer() {
 
 		bc.acks.Add(len(bc.subscriptions))
 		for child := range bc.subscriptions {
-			withPartitionLabels(child.topic, child.partition, func() {
+			withPartitionLabels(ctx, child.topic, child.partition, func(context.Context) {
 				child.feeder <- response
 			})
 		}

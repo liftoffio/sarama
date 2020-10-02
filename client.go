@@ -1,6 +1,7 @@
 package sarama
 
 import (
+	"context"
 	"math/rand"
 	"sort"
 	"sync"
@@ -175,7 +176,7 @@ func NewClient(addrs []string, conf *Config) (Client, error) {
 			return nil, err
 		}
 	}
-	go withRecover(client.backgroundMetadataUpdater)
+	go withRecover(context.Background(), client.backgroundMetadataUpdater)
 
 	Logger.Println("Successfully initialized new client")
 
@@ -232,11 +233,11 @@ func (client *client) Close() error {
 	Logger.Println("Closing Client")
 
 	for _, broker := range client.brokers {
-		safeAsyncClose(broker)
+		safeAsyncClose(context.Background(), broker)
 	}
 
 	for _, broker := range client.seedBrokers {
-		safeAsyncClose(broker)
+		safeAsyncClose(context.Background(), broker)
 	}
 
 	client.brokers = nil
@@ -447,7 +448,7 @@ func (client *client) RefreshMetadata(topics ...string) error {
 	if client.conf.Metadata.Timeout > 0 {
 		deadline = time.Now().Add(client.conf.Metadata.Timeout)
 	}
-	return client.tryRefreshMetadata(topics, client.conf.Metadata.Retry.Max, deadline)
+	return client.tryRefreshMetadata(context.Background(), topics, client.conf.Metadata.Retry.Max, deadline)
 }
 
 func (client *client) GetOffset(topic string, partitionID int32, time int64) (int64, error) {
@@ -555,14 +556,14 @@ func (client *client) RefreshCoordinator(consumerGroup string) error {
 
 	client.lock.Lock()
 	defer client.lock.Unlock()
-	client.registerBroker(response.Coordinator)
+	client.registerBroker(context.Background(), response.Coordinator)
 	client.coordinators[consumerGroup] = response.Coordinator.ID()
 	return nil
 }
 
 // private broker management helpers
 
-func (client *client) updateBroker(brokers []*Broker) {
+func (client *client) updateBroker(ctx context.Context, brokers []*Broker) {
 	var currentBroker = make(map[int32]*Broker, len(brokers))
 
 	for _, broker := range brokers {
@@ -571,7 +572,7 @@ func (client *client) updateBroker(brokers []*Broker) {
 			client.brokers[broker.ID()] = broker
 			Logger.Printf("client/brokers registered new broker #%d at %s", broker.ID(), broker.Addr())
 		} else if broker.Addr() != client.brokers[broker.ID()].Addr() { // replace broker with new address
-			safeAsyncClose(client.brokers[broker.ID()])
+			safeAsyncClose(ctx, client.brokers[broker.ID()])
 			client.brokers[broker.ID()] = broker
 			Logger.Printf("client/brokers replaced registered broker #%d with %s", broker.ID(), broker.Addr())
 		}
@@ -579,7 +580,7 @@ func (client *client) updateBroker(brokers []*Broker) {
 
 	for id, broker := range client.brokers {
 		if _, exist := currentBroker[id]; !exist { // remove old broker
-			safeAsyncClose(broker)
+			safeAsyncClose(ctx, broker)
 			delete(client.brokers, id)
 			Logger.Printf("client/broker remove invalid broker #%d with %s", broker.ID(), broker.Addr())
 		}
@@ -589,7 +590,7 @@ func (client *client) updateBroker(brokers []*Broker) {
 // registerBroker makes sure a broker received by a Metadata or Coordinator request is registered
 // in the brokers map. It returns the broker that is registered, which may be the provided broker,
 // or a previously registered Broker instance. You must hold the write lock before calling this function.
-func (client *client) registerBroker(broker *Broker) {
+func (client *client) registerBroker(ctx context.Context, broker *Broker) {
 	if client.brokers == nil {
 		Logger.Printf("cannot register broker #%d at %s, client already closed", broker.ID(), broker.Addr())
 		return
@@ -599,7 +600,7 @@ func (client *client) registerBroker(broker *Broker) {
 		client.brokers[broker.ID()] = broker
 		Logger.Printf("client/brokers registered new broker #%d at %s", broker.ID(), broker.Addr())
 	} else if broker.Addr() != client.brokers[broker.ID()].Addr() {
-		safeAsyncClose(client.brokers[broker.ID()])
+		safeAsyncClose(ctx, client.brokers[broker.ID()])
 		client.brokers[broker.ID()] = broker
 		Logger.Printf("client/brokers replaced registered broker #%d with %s", broker.ID(), broker.Addr())
 	}
@@ -765,7 +766,7 @@ func (client *client) getOffset(topic string, partitionID int32, time int64) (in
 
 // core metadata update logic
 
-func (client *client) backgroundMetadataUpdater() {
+func (client *client) backgroundMetadataUpdater(context.Context) {
 	defer close(client.closed)
 
 	if client.conf.Metadata.RefreshFrequency == time.Duration(0) {
@@ -807,7 +808,7 @@ func (client *client) refreshMetadata() error {
 	return nil
 }
 
-func (client *client) tryRefreshMetadata(topics []string, attemptsRemaining int, deadline time.Time) error {
+func (client *client) tryRefreshMetadata(ctx context.Context, topics []string, attemptsRemaining int, deadline time.Time) error {
 	pastDeadline := func(backoff time.Duration) bool {
 		if !deadline.IsZero() && time.Now().Add(backoff).After(deadline) {
 			// we are past the deadline
@@ -826,7 +827,7 @@ func (client *client) tryRefreshMetadata(topics []string, attemptsRemaining int,
 			if backoff > 0 {
 				time.Sleep(backoff)
 			}
-			return client.tryRefreshMetadata(topics, attemptsRemaining-1, deadline)
+			return client.tryRefreshMetadata(ctx, topics, attemptsRemaining-1, deadline)
 		}
 		return err
 	}
@@ -852,7 +853,7 @@ func (client *client) tryRefreshMetadata(topics []string, attemptsRemaining int,
 		case nil:
 			allKnownMetaData := len(topics) == 0
 			// valid response, use it
-			shouldRetry, err := client.updateMetadata(response, allKnownMetaData)
+			shouldRetry, err := client.updateMetadata(ctx, response, allKnownMetaData)
 			if shouldRetry {
 				Logger.Println("client/metadata found some partitions to be leaderless")
 				return retry(err) // note: err can be nil
@@ -898,7 +899,7 @@ func (client *client) tryRefreshMetadata(topics []string, attemptsRemaining int,
 }
 
 // if no fatal error, returns a list of topics that need retrying due to ErrLeaderNotAvailable
-func (client *client) updateMetadata(data *MetadataResponse, allKnownMetaData bool) (retry bool, err error) {
+func (client *client) updateMetadata(ctx context.Context, data *MetadataResponse, allKnownMetaData bool) (retry bool, err error) {
 	if client.Closed() {
 		return
 	}
@@ -911,7 +912,7 @@ func (client *client) updateMetadata(data *MetadataResponse, allKnownMetaData bo
 	// - if it is an existing ID, but the address we have is stale, discard the old one and save it
 	// - if some brokers is not exist in it, remove old broker
 	// - otherwise ignore it, replacing our existing one would just bounce the connection
-	client.updateBroker(data.Brokers)
+	client.updateBroker(ctx, data.Brokers)
 
 	client.controllerID = data.ControllerID
 
