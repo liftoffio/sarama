@@ -63,6 +63,7 @@ type Consumer interface {
 	// on the given topic/partition. Offset can be a literal offset, or OffsetNewest
 	// or OffsetOldest
 	ConsumePartition(topic string, partition int32, offset int64) (PartitionConsumer, error)
+	ConsumePartitionWithCtx(ctx context.Context, topic string, partition int32, offset int64) (PartitionConsumer, error)
 
 	// HighWaterMarks returns the current high water marks for each topic and partition.
 	// Consistency between partitions is not guaranteed since high water marks are updated separately.
@@ -128,6 +129,9 @@ func (c *consumer) Partitions(topic string) ([]int32, error) {
 }
 
 func (c *consumer) ConsumePartition(topic string, partition int32, offset int64) (PartitionConsumer, error) {
+	return c.ConsumePartitionWithCtx(context.Background(), topic, partition, offset)
+}
+func (c *consumer) ConsumePartitionWithCtx(ctx context.Context, topic string, partition int32, offset int64) (PartitionConsumer, error) {
 	child := &partitionConsumer{
 		consumer:  c,
 		conf:      c.conf,
@@ -155,15 +159,16 @@ func (c *consumer) ConsumePartition(topic string, partition int32, offset int64)
 		return nil, err
 	}
 
-	ctx := context.Background()
-	go withPartitionLabels(ctx, topic, partition, func(context.Context) {
-		withRecover(child.dispatcher)
+	go withPartitionLabels(ctx, topic, partition, func(ctx context.Context) {
+		withRecover(func() {
+			child.dispatcher(ctx)
+		})
 	})
 	go withPartitionLabels(ctx, topic, partition, func(context.Context) {
 		withRecover(child.responseFeeder)
 	})
 
-	child.broker = c.refBrokerConsumer(leader)
+	child.broker = c.refBrokerConsumer(ctx, leader)
 	child.broker.input <- child
 
 	return child, nil
@@ -210,13 +215,13 @@ func (c *consumer) removeChild(child *partitionConsumer) {
 	delete(c.children[child.topic], child.partition)
 }
 
-func (c *consumer) refBrokerConsumer(broker *Broker) *brokerConsumer {
+func (c *consumer) refBrokerConsumer(ctx context.Context, broker *Broker) *brokerConsumer {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
 	bc := c.brokerConsumers[broker]
 	if bc == nil {
-		bc = c.newBrokerConsumer(broker)
+		bc = c.newBrokerConsumer(ctx, broker)
 		c.brokerConsumers[broker] = bc
 	}
 
@@ -339,7 +344,7 @@ func (child *partitionConsumer) computeBackoff() time.Duration {
 	return child.conf.Consumer.Retry.Backoff
 }
 
-func (child *partitionConsumer) dispatcher() {
+func (child *partitionConsumer) dispatcher(ctx context.Context) {
 	for range child.trigger {
 		select {
 		case <-child.dying:
@@ -351,7 +356,7 @@ func (child *partitionConsumer) dispatcher() {
 			}
 
 			Logger.Printf("consumer/%s/%d finding new broker\n", child.topic, child.partition)
-			if err := child.dispatch(); err != nil {
+			if err := child.dispatch(ctx); err != nil {
 				child.sendError(err)
 				child.trigger <- none{}
 			}
@@ -365,7 +370,7 @@ func (child *partitionConsumer) dispatcher() {
 	close(child.feeder)
 }
 
-func (child *partitionConsumer) dispatch() error {
+func (child *partitionConsumer) dispatch(ctx context.Context) error {
 	if err := child.consumer.client.RefreshMetadata(child.topic); err != nil {
 		return err
 	}
@@ -376,7 +381,7 @@ func (child *partitionConsumer) dispatch() error {
 		return err
 	}
 
-	child.broker = child.consumer.refBrokerConsumer(leader)
+	child.broker = child.consumer.refBrokerConsumer(ctx, leader)
 
 	child.broker.input <- child
 
@@ -713,7 +718,7 @@ type brokerConsumer struct {
 	refs             int
 }
 
-func (c *consumer) newBrokerConsumer(broker *Broker) *brokerConsumer {
+func (c *consumer) newBrokerConsumer(ctx context.Context, broker *Broker) *brokerConsumer {
 	bc := &brokerConsumer{
 		consumer:         c,
 		broker:           broker,
@@ -724,7 +729,6 @@ func (c *consumer) newBrokerConsumer(broker *Broker) *brokerConsumer {
 		refs:             0,
 	}
 
-	ctx := context.Background()
 	go withBrokerLabels(ctx, broker, func(context.Context) {
 		withRecover(bc.subscriptionManager)
 	})
