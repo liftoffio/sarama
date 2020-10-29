@@ -584,6 +584,26 @@ func (child *partitionConsumer) parseResponse(response *FetchResponse) ([]*Consu
 		return nil, nil
 	}
 
+	// NOTE(aklochkov): When a response is throttled, Kafka returns a response
+	// with non-zero ThrottleTime and the Blocks map containing all blocks from
+	// the request, with every block entry containing no messages. The code
+	// above would not handle such responses correctly.
+	//
+	// We do not enable quotas so we never expect responses to be throttled.
+	//
+	// The log message emitted below will help detect a problem with Kafka
+	// unexpectedly throttling fetch requests.
+	//
+	// See https://cwiki.apache.org/confluence/display/KAFKA/KIP-219+-+Improve+quota+communication
+	// for more details on how Kafka reports throttling to the client and what
+	// it expects the client to do. Sarama does NOT handle throttling correctly
+	// as of version 1.27.0.
+	if response.ThrottleTime != time.Duration(0) {
+		Logger.Printf(
+			"consumer/broker/%d FetchResponse throttled %v\n",
+			child.broker.broker.ID(), response.ThrottleTime)
+	}
+
 	block := response.GetBlock(child.topic, child.partition)
 	if block == nil {
 		return nil, ErrIncompleteResponse
