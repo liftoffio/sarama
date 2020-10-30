@@ -321,6 +321,9 @@ type Config struct {
 			// (no limit). Similar to the JVM's `fetch.message.max.bytes`. The
 			// global `sarama.MaxResponseSize` still applies.
 			Max int32
+			// Called to check if detailed metrics has to be emitted for a
+			// specific topic-partition. By default such metrics are not emitted.
+			DetailedMetricsFunc func(topic string, partition int32) bool
 		}
 		// The maximum amount of time the broker will wait for Consumer.Fetch.Min
 		// bytes to become available before it returns fewer than that anyways. The
