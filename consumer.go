@@ -318,6 +318,21 @@ type partitionConsumer struct {
 	fetchSize      int32
 	offset         int64
 	retries        int32
+
+	mu         sync.Mutex
+	fetchStats bool
+}
+
+func (child *partitionConsumer) RecordFetchStats(enabled bool) {
+	child.mu.Lock()
+	child.fetchStats = enabled
+	child.mu.Unlock()
+}
+
+func (child *partitionConsumer) fetchStatsEnabled() bool {
+	child.mu.Lock()
+	defer child.mu.Unlock()
+	return child.fetchStats
 }
 
 var errTimedOut = errors.New("timed out feeding messages to the user") // not user-facing
@@ -605,17 +620,28 @@ func (child *partitionConsumer) parseResponse(response *FetchResponse) ([]*Consu
 	}
 
 	block := response.GetBlock(child.topic, child.partition)
+
 	if block == nil {
+		if child.fetchStatsEnabled() && metricRegistry != nil {
+			getOrRegisterPartitionCounter("consumer-incomplete-responses", child.topic, child.partition, metricRegistry).Inc(1)
+		}
 		return nil, ErrIncompleteResponse
 	}
 
 	if block.Err != ErrNoError {
+		if child.fetchStatsEnabled() && metricRegistry != nil {
+			getOrRegisterPartitionCounter("consumer-fetch-errors", child.topic, child.partition, metricRegistry).Inc(1)
+		}
 		return nil, block.Err
 	}
 
 	nRecs, err := block.numRecords()
 	if err != nil {
 		return nil, err
+	}
+
+	if child.fetchStatsEnabled() && metricRegistry != nil {
+		getOrRegisterPartitionHistogram("consumer-batch-size", child.topic, child.partition, metricRegistry).Update(int64(nRecs))
 	}
 
 	consumerBatchSizeMetric.Update(int64(nRecs))
@@ -628,6 +654,9 @@ func (child *partitionConsumer) parseResponse(response *FetchResponse) ([]*Consu
 		// We got no messages. If we got a trailing one then we need to ask for more data.
 		// Otherwise we just poll again and wait for one to be produced...
 		if partialTrailingMessage {
+			if child.fetchStatsEnabled() && metricRegistry != nil {
+				getOrRegisterPartitionCounter("consumer-partial-fetches", child.topic, child.partition, metricRegistry).Inc(1)
+			}
 			if child.conf.Consumer.Fetch.Max > 0 && child.fetchSize == child.conf.Consumer.Fetch.Max {
 				// we can't ask for more data, we've hit the configured limit
 				child.sendError(ErrMessageTooLarge)
@@ -722,6 +751,10 @@ func (child *partitionConsumer) parseResponse(response *FetchResponse) ([]*Consu
 		default:
 			return nil, fmt.Errorf("unknown records type: %v", records.recordsType)
 		}
+	}
+
+	if child.fetchStatsEnabled() && metricRegistry != nil {
+		getOrRegisterPartitionHistogram("consumer-fetched-messages", child.topic, child.partition, metricRegistry).Update(int64(len(messages)))
 	}
 
 	return messages, nil
@@ -945,9 +978,23 @@ func (bc *brokerConsumer) fetchNewMessages() (*FetchResponse, error) {
 		request.RackID = bc.consumer.conf.RackID
 	}
 
+	start := time.Now()
+	var latencyMetrics []metrics.Histogram
 	for child := range bc.subscriptions {
+		metricRegistry := child.conf.MetricRegistry
+		if child.fetchStatsEnabled() && metricRegistry != nil {
+			m := getOrRegisterPartitionHistogram("fetch-latency-in-ms", child.topic, child.partition, metricRegistry)
+			latencyMetrics = append(latencyMetrics, m)
+		}
 		request.AddBlock(child.topic, child.partition, child.offset, child.fetchSize)
 	}
 
-	return bc.broker.Fetch(request)
+	resp, err := bc.broker.Fetch(request)
+
+	latency := int64(time.Since(start) / time.Millisecond)
+	for _, m := range latencyMetrics {
+		m.Update(latency)
+	}
+
+	return resp, err
 }

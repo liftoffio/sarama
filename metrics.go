@@ -34,10 +34,28 @@ func getMetricNameForTopic(name string, topic string) string {
 	return fmt.Sprintf(name+"-for-topic-%s", strings.Replace(topic, ".", "_", -1))
 }
 
+func getMetricNameForPartition(name string, topic string, partition int32) string {
+	// Convert dot to _ since reporters like Graphite typically use dot to represent hierarchy
+	// cf. KAFKA-1902 and KAFKA-2337
+	return fmt.Sprintf(name+"-for-part-%s-%d", strings.Replace(topic, ".", "_", -1), partition)
+}
+
 func getOrRegisterTopicMeter(name string, topic string, r metrics.Registry) metrics.Meter {
 	return metrics.GetOrRegisterMeter(getMetricNameForTopic(name, topic), r)
 }
 
 func getOrRegisterTopicHistogram(name string, topic string, r metrics.Registry) metrics.Histogram {
 	return getOrRegisterHistogram(getMetricNameForTopic(name, topic), r)
+}
+
+func getOrRegisterPartitionCounter(name string, topic string, partition int32, r metrics.Registry) metrics.Counter {
+	return metrics.GetOrRegisterCounter(getMetricNameForPartition(name, topic, partition), r)
+}
+
+func getOrRegisterPartitionMeter(name string, topic string, partition int32, r metrics.Registry) metrics.Meter {
+	return metrics.GetOrRegisterMeter(getMetricNameForPartition(name, topic, partition), r)
+}
+
+func getOrRegisterPartitionHistogram(name string, topic string, partition int32, r metrics.Registry) metrics.Histogram {
+	return getOrRegisterHistogram(getMetricNameForPartition(name, topic, partition), r)
 }
