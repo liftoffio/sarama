@@ -327,6 +327,20 @@ func (child *partitionConsumer) fetchStatsEnabled() bool {
 	return false
 }
 
+func (child *partitionConsumer) maybeIncrementPartitionCounter(name string) {
+	metricRegistry := child.conf.MetricRegistry
+	if child.fetchStatsEnabled() && metricRegistry != nil {
+		getOrRegisterPartitionCounter(name, child.topic, child.partition, metricRegistry).Inc(1)
+	}
+}
+
+func (child *partitionConsumer) maybeUpdatePartitionHistogram(name string, value int64) {
+	metricRegistry := child.conf.MetricRegistry
+	if child.fetchStatsEnabled() && metricRegistry != nil {
+		getOrRegisterPartitionHistogram(name, child.topic, child.partition, metricRegistry).Update(value)
+	}
+}
+
 var errTimedOut = errors.New("timed out feeding messages to the user") // not user-facing
 
 func (child *partitionConsumer) sendError(err error) {
@@ -571,20 +585,6 @@ func (child *partitionConsumer) parseRecords(batch *RecordBatch) ([]*ConsumerMes
 		child.offset++
 	}
 	return messages, nil
-}
-
-func (child *partitionConsumer) maybeIncrementPartitionCounter(name string) {
-	metricRegistry := child.conf.MetricRegistry
-	if child.fetchStatsEnabled() && metricRegistry != nil {
-		getOrRegisterPartitionCounter(name, child.topic, child.partition, metricRegistry).Inc(1)
-	}
-}
-
-func (child *partitionConsumer) maybeUpdatePartitionHistogram(name string, value int64) {
-	metricRegistry := child.conf.MetricRegistry
-	if child.fetchStatsEnabled() && metricRegistry != nil {
-		getOrRegisterPartitionHistogram(name, child.topic, child.partition, metricRegistry).Update(value)
-	}
 }
 
 func (child *partitionConsumer) parseResponse(response *FetchResponse) ([]*ConsumerMessage, error) {
