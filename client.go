@@ -1,6 +1,7 @@
 package sarama
 
 import (
+	"context"
 	"math/rand"
 	"sort"
 	"sync"
@@ -44,6 +45,10 @@ type Client interface {
 	// topic/partition, as determined by querying the cluster metadata.
 	Leader(topic string, partitionID int32) (*Broker, error)
 
+	// LeaderWithCtx returns the broker object that is the leader of the current
+	// topic/partition, as determined by querying the cluster metadata.
+	LeaderWithCtx(ctx context.Context, topic string, partitionID int32) (*Broker, error)
+
 	// Replicas returns the set of all replica IDs for the given partition.
 	Replicas(topic string, partitionID int32) ([]int32, error)
 
@@ -60,6 +65,11 @@ type Client interface {
 	// available metadata for those topics. If no topics are provided, it will refresh
 	// metadata for all topics.
 	RefreshMetadata(topics ...string) error
+
+	// RefreshMetadataWithCtx takes a list of topics and queries the cluster to refresh the
+	// available metadata for those topics. If no topics are provided, it will refresh
+	// metadata for all topics.
+	RefreshMetadataWithCtx(ctx context.Context, topics ...string) error
 
 	// GetOffset queries the cluster to get the most recent available offset at the
 	// given time (in milliseconds) on the topic/partition combination.
@@ -130,6 +140,13 @@ type client struct {
 // and uses that broker to automatically fetch metadata on the rest of the kafka cluster. If metadata cannot
 // be retrieved from any of the given broker addresses, the client is not created.
 func NewClient(addrs []string, conf *Config) (Client, error) {
+	return NewClientWithCtx(context.Background(), addrs, conf)
+}
+
+// NewClientWithCtx creates a new Client. It connects to one of the given broker addresses
+// and uses that broker to automatically fetch metadata on the rest of the kafka cluster. If metadata cannot
+// be retrieved from any of the given broker addresses, the client is not created.
+func NewClientWithCtx(ctx context.Context, addrs []string, conf *Config) (Client, error) {
 	Logger.Println("Initializing new client")
 
 	if conf == nil {
@@ -175,7 +192,9 @@ func NewClient(addrs []string, conf *Config) (Client, error) {
 			return nil, err
 		}
 	}
-	go withRecover(client.backgroundMetadataUpdater)
+	go withRecover(func() {
+		client.backgroundMetadataUpdater(ctx)
+	})
 
 	Logger.Println("Successfully initialized new client")
 
@@ -198,7 +217,7 @@ func (client *client) Brokers() []*Broker {
 
 func (client *client) InitProducerID() (*InitProducerIDResponse, error) {
 	var err error
-	for broker := client.any(); broker != nil; broker = client.any() {
+	for broker := client.any(context.Background()); broker != nil; broker = client.any(context.Background()) {
 		req := &InitProducerIDRequest{}
 
 		response, err := broker.InitProducerID(req)
@@ -412,24 +431,32 @@ func (client *client) OfflineReplicas(topic string, partitionID int32) ([]int32,
 }
 
 func (client *client) Leader(topic string, partitionID int32) (*Broker, error) {
+	return client.LeaderWithCtx(context.Background(), topic, partitionID)
+}
+
+func (client *client) LeaderWithCtx(ctx context.Context, topic string, partitionID int32) (*Broker, error) {
 	if client.Closed() {
 		return nil, ErrClosedClient
 	}
 
-	leader, err := client.cachedLeader(topic, partitionID)
+	leader, err := client.cachedLeader(ctx, topic, partitionID)
 
 	if leader == nil {
-		err = client.RefreshMetadata(topic)
+		err = client.RefreshMetadataWithCtx(ctx, topic)
 		if err != nil {
 			return nil, err
 		}
-		leader, err = client.cachedLeader(topic, partitionID)
+		leader, err = client.cachedLeader(ctx, topic, partitionID)
 	}
 
 	return leader, err
 }
 
 func (client *client) RefreshMetadata(topics ...string) error {
+	return client.RefreshMetadataWithCtx(context.Background(), topics...)
+}
+
+func (client *client) RefreshMetadataWithCtx(ctx context.Context, topics ...string) error {
 	if client.Closed() {
 		return ErrClosedClient
 	}
@@ -447,7 +474,7 @@ func (client *client) RefreshMetadata(topics ...string) error {
 	if client.conf.Metadata.Timeout > 0 {
 		deadline = time.Now().Add(client.conf.Metadata.Timeout)
 	}
-	return client.tryRefreshMetadata(topics, client.conf.Metadata.Retry.Max, deadline)
+	return client.tryRefreshMetadata(ctx, topics, client.conf.Metadata.Retry.Max, deadline)
 }
 
 func (client *client) GetOffset(topic string, partitionID int32, time int64) (int64, error) {
@@ -478,7 +505,7 @@ func (client *client) Controller() (*Broker, error) {
 
 	controller := client.cachedController()
 	if controller == nil {
-		if err := client.refreshMetadata(); err != nil {
+		if err := client.refreshMetadata(context.Background()); err != nil {
 			return nil, err
 		}
 		controller = client.cachedController()
@@ -508,7 +535,7 @@ func (client *client) RefreshController() (*Broker, error) {
 
 	client.deregisterController()
 
-	if err := client.refreshMetadata(); err != nil {
+	if err := client.refreshMetadata(context.Background()); err != nil {
 		return nil, err
 	}
 
@@ -633,18 +660,18 @@ func (client *client) resurrectDeadBrokers() {
 	client.deadSeeds = nil
 }
 
-func (client *client) any() *Broker {
+func (client *client) any(ctx context.Context) *Broker {
 	client.lock.RLock()
 	defer client.lock.RUnlock()
 
 	if len(client.seedBrokers) > 0 {
-		_ = client.seedBrokers[0].Open(client.conf)
+		_ = client.seedBrokers[0].OpenWithCtx(ctx, client.conf)
 		return client.seedBrokers[0]
 	}
 
 	// not guaranteed to be random *or* deterministic
 	for _, broker := range client.brokers {
-		_ = broker.Open(client.conf)
+		_ = broker.OpenWithCtx(ctx, client.conf)
 		return broker
 	}
 
@@ -707,7 +734,7 @@ func (client *client) setPartitionCache(topic string, partitionSet partitionType
 	return ret
 }
 
-func (client *client) cachedLeader(topic string, partitionID int32) (*Broker, error) {
+func (client *client) cachedLeader(ctx context.Context, topic string, partitionID int32) (*Broker, error) {
 	client.lock.RLock()
 	defer client.lock.RUnlock()
 
@@ -722,7 +749,7 @@ func (client *client) cachedLeader(topic string, partitionID int32) (*Broker, er
 			if b == nil {
 				return nil, ErrLeaderNotAvailable
 			}
-			_ = b.Open(client.conf)
+			_ = b.OpenWithCtx(ctx, client.conf)
 			return b, nil
 		}
 	}
@@ -765,7 +792,7 @@ func (client *client) getOffset(topic string, partitionID int32, time int64) (in
 
 // core metadata update logic
 
-func (client *client) backgroundMetadataUpdater() {
+func (client *client) backgroundMetadataUpdater(ctx context.Context) {
 	defer close(client.closed)
 
 	if client.conf.Metadata.RefreshFrequency == time.Duration(0) {
@@ -778,7 +805,7 @@ func (client *client) backgroundMetadataUpdater() {
 	for {
 		select {
 		case <-ticker.C:
-			if err := client.refreshMetadata(); err != nil {
+			if err := client.refreshMetadata(ctx); err != nil {
 				Logger.Println("Client background metadata update:", err)
 			}
 		case <-client.closer:
@@ -787,7 +814,7 @@ func (client *client) backgroundMetadataUpdater() {
 	}
 }
 
-func (client *client) refreshMetadata() error {
+func (client *client) refreshMetadata(ctx context.Context) error {
 	var topics []string
 
 	if !client.conf.Metadata.Full {
@@ -800,14 +827,14 @@ func (client *client) refreshMetadata() error {
 		}
 	}
 
-	if err := client.RefreshMetadata(topics...); err != nil {
+	if err := client.RefreshMetadataWithCtx(ctx, topics...); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (client *client) tryRefreshMetadata(topics []string, attemptsRemaining int, deadline time.Time) error {
+func (client *client) tryRefreshMetadata(ctx context.Context, topics []string, attemptsRemaining int, deadline time.Time) error {
 	pastDeadline := func(backoff time.Duration) bool {
 		if !deadline.IsZero() && time.Now().Add(backoff).After(deadline) {
 			// we are past the deadline
@@ -826,13 +853,13 @@ func (client *client) tryRefreshMetadata(topics []string, attemptsRemaining int,
 			if backoff > 0 {
 				time.Sleep(backoff)
 			}
-			return client.tryRefreshMetadata(topics, attemptsRemaining-1, deadline)
+			return client.tryRefreshMetadata(ctx, topics, attemptsRemaining-1, deadline)
 		}
 		return err
 	}
 
-	broker := client.any()
-	for ; broker != nil && !pastDeadline(0); broker = client.any() {
+	broker := client.any(ctx)
+	for ; broker != nil && !pastDeadline(0); broker = client.any(ctx) {
 		allowAutoTopicCreation := true
 		if len(topics) > 0 {
 			Logger.Printf("client/metadata fetching metadata for %v from broker %s\n", topics, broker.addr)
@@ -1001,7 +1028,7 @@ func (client *client) getConsumerMetadata(consumerGroup string, attemptsRemainin
 		return nil, err
 	}
 
-	for broker := client.any(); broker != nil; broker = client.any() {
+	for broker := client.any(context.Background()); broker != nil; broker = client.any(context.Background()) {
 		Logger.Printf("client/coordinator requesting coordinator for consumergroup %s from %s\n", consumerGroup, broker.Addr())
 
 		request := new(FindCoordinatorRequest)

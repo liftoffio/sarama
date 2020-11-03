@@ -1,11 +1,13 @@
 package sarama
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
@@ -137,6 +139,15 @@ func NewBroker(addr string) *Broker {
 // follow it by a call to Connected(). The only errors Open will return directly are ConfigurationError or
 // AlreadyConnected. If conf is nil, the result of NewConfig() is used.
 func (b *Broker) Open(conf *Config) error {
+	return b.OpenWithCtx(context.Background(), conf)
+}
+
+// OpenWithCtx tries to connect to the Broker if it is not already connected or connecting, but does not block
+// waiting for the connection to complete. This means that any subsequent operations on the broker will
+// block waiting for the connection to succeed or fail. To get the effect of a fully synchronous Open call,
+// follow it by a call to Connected(). The only errors Open will return directly are ConfigurationError or
+// AlreadyConnected. If conf is nil, the result of NewConfig() is used.
+func (b *Broker) OpenWithCtx(ctx context.Context, conf *Config) error {
 	if !atomic.CompareAndSwapInt32(&b.opened, 0, 1) {
 		return ErrAlreadyConnected
 	}
@@ -209,7 +220,11 @@ func (b *Broker) Open(conf *Config) error {
 		} else {
 			Logger.Printf("Connected to broker at %s (unregistered)\n", b.addr)
 		}
-		go withRecover(b.responseReceiver)
+		go withBrokerLabels(ctx, b, func(ctx context.Context) {
+			withRecover(func() {
+				b.responseReceiver(ctx)
+			})
+		})
 	})
 
 	return nil
@@ -860,10 +875,15 @@ func (b *Broker) encode(pe packetEncoder, version int16) (err error) {
 	return nil
 }
 
-func (b *Broker) responseReceiver() {
+func (b *Broker) responseReceiver(ctx context.Context) {
 	var dead error
 
+	labelsUpdated := false
 	for response := range b.responses {
+		if labelsUpdated {
+			pprof.SetGoroutineLabels(ctx)
+			labelsUpdated = false
+		}
 		if dead != nil {
 			// This was previously incremented in send() and
 			// we are not calling updateIncomingCommunicationMetrics()
@@ -874,11 +894,20 @@ func (b *Broker) responseReceiver() {
 
 		if r, ok := response.request.body.(*FetchRequest); ok {
 			queueTimeInMs := int64(time.Since(response.requestTime) / time.Millisecond)
+			var partitionsLabel strings.Builder
 			for t, partitions := range r.blocks {
 				for p := range partitions {
 					maybeUpdatePartitionHistogram(b.conf, "request-queue-time", t, p, queueTimeInMs)
+
+					if partitionsLabel.Len() > 0 {
+						partitionsLabel.WriteRune(',')
+					}
+					partitionsLabel.WriteString(fmt.Sprintf("%s-%d", t, p))
 				}
 			}
+			labels := pprof.Labels("fetch-partitions", partitionsLabel.String())
+			pprof.SetGoroutineLabels(pprof.WithLabels(ctx, labels))
+			labelsUpdated = true
 		}
 
 		var headerLength = getHeaderLength(response.headerVersion)

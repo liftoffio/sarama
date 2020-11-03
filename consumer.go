@@ -84,7 +84,12 @@ type consumer struct {
 
 // NewConsumer creates a new consumer using the given broker addresses and configuration.
 func NewConsumer(addrs []string, config *Config) (Consumer, error) {
-	client, err := NewClient(addrs, config)
+	return NewConsumerWithCtx(context.Background(), addrs, config)
+}
+
+// NewConsumerWithCtx creates a new consumer using the given broker addresses and configuration.
+func NewConsumerWithCtx(ctx context.Context, addrs []string, config *Config) (Consumer, error) {
+	client, err := NewClientWithCtx(ctx, addrs, config)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +156,7 @@ func (c *consumer) ConsumePartitionWithCtx(ctx context.Context, topic string, pa
 
 	var leader *Broker
 	var err error
-	if leader, err = c.client.Leader(child.topic, child.partition); err != nil {
+	if leader, err = c.client.LeaderWithCtx(ctx, child.topic, child.partition); err != nil {
 		return nil, err
 	}
 
@@ -371,13 +376,13 @@ func (child *partitionConsumer) dispatcher(ctx context.Context) {
 }
 
 func (child *partitionConsumer) dispatch(ctx context.Context) error {
-	if err := child.consumer.client.RefreshMetadata(child.topic); err != nil {
+	if err := child.consumer.client.RefreshMetadataWithCtx(ctx, child.topic); err != nil {
 		return err
 	}
 
 	var leader *Broker
 	var err error
-	if leader, err = child.consumer.client.Leader(child.topic, child.partition); err != nil {
+	if leader, err = child.consumer.client.LeaderWithCtx(ctx, child.topic, child.partition); err != nil {
 		return err
 	}
 
