@@ -320,27 +320,6 @@ type partitionConsumer struct {
 	retries        int32
 }
 
-func (child *partitionConsumer) fetchStatsEnabled() bool {
-	if child.conf.Consumer.Fetch.MetricsFunc != nil {
-		return child.conf.Consumer.Fetch.MetricsFunc(child.topic, child.partition)
-	}
-	return false
-}
-
-func (child *partitionConsumer) maybeIncrementPartitionCounter(name string) {
-	metricRegistry := child.conf.MetricRegistry
-	if child.fetchStatsEnabled() && metricRegistry != nil {
-		getOrRegisterPartitionCounter(name, child.topic, child.partition, metricRegistry).Inc(1)
-	}
-}
-
-func (child *partitionConsumer) maybeUpdatePartitionHistogram(name string, value int64) {
-	metricRegistry := child.conf.MetricRegistry
-	if child.fetchStatsEnabled() && metricRegistry != nil {
-		getOrRegisterPartitionHistogram(name, child.topic, child.partition, metricRegistry).Update(value)
-	}
-}
-
 var errTimedOut = errors.New("timed out feeding messages to the user") // not user-facing
 
 func (child *partitionConsumer) sendError(err error) {
@@ -628,12 +607,12 @@ func (child *partitionConsumer) parseResponse(response *FetchResponse) ([]*Consu
 	block := response.GetBlock(child.topic, child.partition)
 
 	if block == nil {
-		child.maybeIncrementPartitionCounter("consumer-incomplete-responses")
+		maybeIncrementPartitionCounter(child.conf, "consumer-incomplete-responses", child.topic, child.partition)
 		return nil, ErrIncompleteResponse
 	}
 
 	if block.Err != ErrNoError {
-		child.maybeIncrementPartitionCounter("consumer-fetch-errors")
+		maybeIncrementPartitionCounter(child.conf, "consumer-fetch-errors", child.topic, child.partition)
 		return nil, block.Err
 	}
 
@@ -642,7 +621,7 @@ func (child *partitionConsumer) parseResponse(response *FetchResponse) ([]*Consu
 		return nil, err
 	}
 
-	child.maybeUpdatePartitionHistogram("consumer-batch-size", int64(nRecs))
+	maybeUpdatePartitionHistogram(child.conf, "consumer-batch-size", child.topic, child.partition, int64(nRecs))
 	consumerBatchSizeMetric.Update(int64(nRecs))
 
 	if nRecs == 0 {
@@ -653,7 +632,7 @@ func (child *partitionConsumer) parseResponse(response *FetchResponse) ([]*Consu
 		// We got no messages. If we got a trailing one then we need to ask for more data.
 		// Otherwise we just poll again and wait for one to be produced...
 		if partialTrailingMessage {
-			child.maybeIncrementPartitionCounter("consumer-partial-fetches")
+			maybeIncrementPartitionCounter(child.conf, "consumer-partial-fetches", child.topic, child.partition)
 			if child.conf.Consumer.Fetch.Max > 0 && child.fetchSize == child.conf.Consumer.Fetch.Max {
 				// we can't ask for more data, we've hit the configured limit
 				child.sendError(ErrMessageTooLarge)
@@ -750,7 +729,7 @@ func (child *partitionConsumer) parseResponse(response *FetchResponse) ([]*Consu
 		}
 	}
 
-	child.maybeUpdatePartitionHistogram("consumer-fetched-messages", int64(len(messages)))
+	maybeUpdatePartitionHistogram(child.conf, "consumer-fetched-messages", child.topic, child.partition, int64(len(messages)))
 
 	return messages, nil
 }
@@ -982,7 +961,7 @@ func (bc *brokerConsumer) fetchNewMessages() (*FetchResponse, error) {
 
 	latency := int64(time.Since(start) / time.Millisecond)
 	for child := range bc.subscriptions {
-		child.maybeUpdatePartitionHistogram("fetch-latency-in-ms", latency)
+		maybeUpdatePartitionHistogram(child.conf, "fetch-latency-in-ms", child.topic, child.partition, latency)
 	}
 
 	return resp, err

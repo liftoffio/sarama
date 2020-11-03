@@ -59,3 +59,17 @@ func getOrRegisterPartitionMeter(name string, topic string, partition int32, r m
 func getOrRegisterPartitionHistogram(name string, topic string, partition int32, r metrics.Registry) metrics.Histogram {
 	return getOrRegisterHistogram(getMetricNameForPartition(name, topic, partition), r)
 }
+
+func maybeIncrementPartitionCounter(conf *Config, name string, topic string, partition int32) {
+	metricRegistry := conf.MetricRegistry
+	if conf.fetchStatsEnabled(topic, partition) && metricRegistry != nil {
+		getOrRegisterPartitionCounter(name, topic, partition, metricRegistry).Inc(1)
+	}
+}
+
+func maybeUpdatePartitionHistogram(conf *Config, name string, topic string, partition int32, value int64) {
+	metricRegistry := conf.MetricRegistry
+	if conf.fetchStatsEnabled(topic, partition) && metricRegistry != nil {
+		getOrRegisterPartitionHistogram(name, topic, partition, metricRegistry).Update(value)
+	}
+}

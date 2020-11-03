@@ -246,7 +246,7 @@ func (krbAuth *GSSAPIKerberosAuth) Authorize(broker *Broker) error {
 			bytesRead := 0
 			receivedBytes, bytesRead, err = krbAuth.readPackage(broker)
 			requestLatency := time.Since(requestTime)
-			broker.updateIncomingCommunicationMetrics(bytesRead, requestLatency)
+			broker.updateIncomingCommunicationMetrics(nil, bytesRead, requestLatency)
 			if err != nil {
 				Logger.Printf("Error while performing GSSAPI Kerberos Authentication: %s\n", err)
 				return err

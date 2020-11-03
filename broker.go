@@ -117,6 +117,7 @@ type SCRAMClient interface {
 }
 
 type responsePromise struct {
+	request       *request
 	requestTime   time.Time
 	correlationID int32
 	headerVersion int16
@@ -356,6 +357,14 @@ func (b *Broker) Fetch(request *FetchRequest) (*FetchResponse, error) {
 	err := b.sendAndReceive(request, response)
 	if err != nil {
 		return nil, err
+	}
+
+	for t, partitions := range response.Blocks {
+		for p, blk := range partitions {
+			if blk.Records != nil && blk.Records.RecordBatch != nil {
+				maybeUpdatePartitionHistogram(b.conf, "response-size", t, p, int64(blk.Records.RecordBatch.recordsLen))
+			}
+		}
 	}
 
 	return response, nil
@@ -746,11 +755,11 @@ func (b *Broker) send(rb protocolBody, promiseResponse bool, responseHeaderVersi
 
 	if !promiseResponse {
 		// Record request latency without the response
-		b.updateRequestLatencyAndInFlightMetrics(time.Since(requestTime))
+		b.updateRequestLatencyAndInFlightMetrics(req, time.Since(requestTime))
 		return nil, nil
 	}
 
-	promise := responsePromise{requestTime, req.correlationID, responseHeaderVersion, make(chan []byte), make(chan error)}
+	promise := responsePromise{req, requestTime, req.correlationID, responseHeaderVersion, make(chan []byte), make(chan error)}
 	b.responses <- promise
 
 	return &promise, nil
@@ -852,13 +861,22 @@ func (b *Broker) responseReceiver() {
 			continue
 		}
 
+		if r, ok := response.request.body.(*FetchRequest); ok {
+			queueTimeInMs := int64(time.Since(response.requestTime) / time.Millisecond)
+			for t, partitions := range r.blocks {
+				for p := range partitions {
+					maybeUpdatePartitionHistogram(b.conf, "request-queue-time", t, p, queueTimeInMs)
+				}
+			}
+		}
+
 		var headerLength = getHeaderLength(response.headerVersion)
 		header := make([]byte, headerLength)
 
 		bytesReadHeader, err := b.readFull(header)
 		requestLatency := time.Since(response.requestTime)
 		if err != nil {
-			b.updateIncomingCommunicationMetrics(bytesReadHeader, requestLatency)
+			b.updateIncomingCommunicationMetrics(response.request, bytesReadHeader, requestLatency)
 			dead = err
 			response.errors <- err
 			continue
@@ -867,13 +885,13 @@ func (b *Broker) responseReceiver() {
 		decodedHeader := responseHeader{}
 		err = versionedDecode(header, &decodedHeader, response.headerVersion)
 		if err != nil {
-			b.updateIncomingCommunicationMetrics(bytesReadHeader, requestLatency)
+			b.updateIncomingCommunicationMetrics(response.request, bytesReadHeader, requestLatency)
 			dead = err
 			response.errors <- err
 			continue
 		}
 		if decodedHeader.correlationID != response.correlationID {
-			b.updateIncomingCommunicationMetrics(bytesReadHeader, requestLatency)
+			b.updateIncomingCommunicationMetrics(response.request, bytesReadHeader, requestLatency)
 			// TODO if decoded ID < cur ID, discard until we catch up
 			// TODO if decoded ID > cur ID, save it so when cur ID catches up we have a response
 			dead = PacketDecodingError{fmt.Sprintf("correlation ID didn't match, wanted %d, got %d", response.correlationID, decodedHeader.correlationID)}
@@ -883,7 +901,7 @@ func (b *Broker) responseReceiver() {
 
 		buf := make([]byte, decodedHeader.length-int32(headerLength)+4)
 		bytesReadBody, err := b.readFull(buf)
-		b.updateIncomingCommunicationMetrics(bytesReadHeader+bytesReadBody, requestLatency)
+		b.updateIncomingCommunicationMetrics(response.request, bytesReadHeader+bytesReadBody, requestLatency)
 		if err != nil {
 			dead = err
 			response.errors <- err
@@ -963,7 +981,7 @@ func (b *Broker) sendAndReceiveSASLHandshake(saslType SASLMechanism, version int
 		return err
 	}
 
-	b.updateIncomingCommunicationMetrics(n+8, time.Since(requestTime))
+	b.updateIncomingCommunicationMetrics(req, n+8, time.Since(requestTime))
 	res := &SaslHandshakeResponse{}
 
 	err = versionedDecode(payload, res, 0)
@@ -1042,7 +1060,7 @@ func (b *Broker) sendAndReceiveV0SASLPlainAuth() error {
 
 	header := make([]byte, 4)
 	n, err := b.readFull(header)
-	b.updateIncomingCommunicationMetrics(n, time.Since(requestTime))
+	b.updateIncomingCommunicationMetrics(nil, n, time.Since(requestTime))
 	// If the credentials are valid, we would get a 4 byte response filled with null characters.
 	// Otherwise, the broker closes the connection and we get an EOF
 	if err != nil {
@@ -1074,7 +1092,7 @@ func (b *Broker) sendAndReceiveV1SASLPlainAuth() error {
 	b.correlationID++
 
 	bytesRead, err := b.receiveSASLServerResponse(&SaslAuthenticateResponse{}, correlationID)
-	b.updateIncomingCommunicationMetrics(bytesRead, time.Since(requestTime))
+	b.updateIncomingCommunicationMetrics(nil, bytesRead, time.Since(requestTime))
 
 	// With v1 sasl we get an error message set in the response we can return
 	if err != nil {
@@ -1137,7 +1155,7 @@ func (b *Broker) sendClientMessage(message []byte) (bool, error) {
 	bytesRead, err := b.receiveSASLServerResponse(res, correlationID)
 
 	requestLatency := time.Since(requestTime)
-	b.updateIncomingCommunicationMetrics(bytesRead, requestLatency)
+	b.updateIncomingCommunicationMetrics(nil, bytesRead, requestLatency)
 
 	isChallenge := len(res.SaslAuthBytes) > 0
 
@@ -1184,7 +1202,7 @@ func (b *Broker) sendAndReceiveSASLSCRAMv1() error {
 			return err
 		}
 
-		b.updateIncomingCommunicationMetrics(len(challenge), time.Since(requestTime))
+		b.updateIncomingCommunicationMetrics(nil, len(challenge), time.Since(requestTime))
 		msg, err = scramClient.Step(string(challenge))
 		if err != nil {
 			Logger.Println("SASL authentication failed", err)
@@ -1331,8 +1349,8 @@ func (b *Broker) receiveSASLServerResponse(res *SaslAuthenticateResponse, correl
 	return bytesRead, nil
 }
 
-func (b *Broker) updateIncomingCommunicationMetrics(bytes int, requestLatency time.Duration) {
-	b.updateRequestLatencyAndInFlightMetrics(requestLatency)
+func (b *Broker) updateIncomingCommunicationMetrics(req *request, bytes int, requestLatency time.Duration) {
+	b.updateRequestLatencyAndInFlightMetrics(req, requestLatency)
 	b.responseRate.Mark(1)
 
 	if b.brokerResponseRate != nil {
@@ -1351,7 +1369,7 @@ func (b *Broker) updateIncomingCommunicationMetrics(bytes int, requestLatency ti
 	}
 }
 
-func (b *Broker) updateRequestLatencyAndInFlightMetrics(requestLatency time.Duration) {
+func (b *Broker) updateRequestLatencyAndInFlightMetrics(req *request, requestLatency time.Duration) {
 	requestLatencyInMs := int64(requestLatency / time.Millisecond)
 	b.requestLatency.Update(requestLatencyInMs)
 
@@ -1360,6 +1378,20 @@ func (b *Broker) updateRequestLatencyAndInFlightMetrics(requestLatency time.Dura
 	}
 
 	b.addRequestInFlightMetrics(-1)
+
+	if req != nil && b.conf.MetricRegistry != nil {
+		if r, ok := req.body.(*FetchRequest); ok {
+			for t, partitions := range r.blocks {
+				for p := range partitions {
+					maybeUpdatePartitionHistogram(b.conf, "request-latency", t, p, requestLatencyInMs)
+				}
+			}
+		}
+
+		metric := fmt.Sprintf("%T.request-latency", req.body)
+		h := getOrRegisterHistogram(getMetricNameForBroker(metric, b), b.conf.MetricRegistry)
+		h.Update(requestLatencyInMs)
+	}
 }
 
 func (b *Broker) addRequestInFlightMetrics(i int64) {

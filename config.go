@@ -766,3 +766,10 @@ func (c *Config) getDialer() proxy.Dialer {
 		}
 	}
 }
+
+func (c *Config) fetchStatsEnabled(topic string, partition int32) bool {
+	if c.Consumer.Fetch.MetricsFunc != nil {
+		return c.Consumer.Fetch.MetricsFunc(topic, partition)
+	}
+	return false
+}
