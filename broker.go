@@ -782,6 +782,17 @@ func (b *Broker) sendAndReceive(req protocolBody, res protocolBody) error {
 
 	select {
 	case buf := <-promise.packets:
+		if r, ok := res.(*FetchResponse); ok {
+			start := time.Now()
+			defer func() {
+				latencyInMs := int64(time.Since(start) / time.Millisecond)
+				for t, partitions := range r.Blocks {
+					for p := range partitions {
+						maybeUpdatePartitionHistogram(b.conf, "fetch-decode-latency", t, p, latencyInMs)
+					}
+				}
+			}()
+		}
 		return versionedDecode(buf, res, req.version())
 	case err = <-promise.errors:
 		return err
