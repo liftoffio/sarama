@@ -376,9 +376,11 @@ func (b *Broker) Fetch(request *FetchRequest) (*FetchResponse, error) {
 
 	for t, partitions := range response.Blocks {
 		for p, blk := range partitions {
+			l := 0
 			if blk.Records != nil && blk.Records.RecordBatch != nil {
-				maybeUpdatePartitionHistogram(b.conf, "response-size", t, p, int64(blk.Records.RecordBatch.recordsLen))
+				l = blk.Records.RecordBatch.recordsLen
 			}
+			maybeUpdatePartitionHistogram(b.conf, "response-size", t, p, int64(l))
 		}
 	}
 
