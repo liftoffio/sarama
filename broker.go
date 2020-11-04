@@ -878,12 +878,9 @@ func (b *Broker) encode(pe packetEncoder, version int16) (err error) {
 func (b *Broker) responseReceiver(ctx context.Context) {
 	var dead error
 
-	labelsUpdated := false
 	for response := range b.responses {
-		if labelsUpdated {
-			pprof.SetGoroutineLabels(ctx)
-			labelsUpdated = false
-		}
+		pprof.SetGoroutineLabels(ctx)
+
 		if dead != nil {
 			// This was previously incremented in send() and
 			// we are not calling updateIncomingCommunicationMetrics()
@@ -892,8 +889,9 @@ func (b *Broker) responseReceiver(ctx context.Context) {
 			continue
 		}
 
+		var labels []string
+		queueTimeInMs := int64(time.Since(response.requestTime) / time.Millisecond)
 		if r, ok := response.request.body.(*FetchRequest); ok {
-			queueTimeInMs := int64(time.Since(response.requestTime) / time.Millisecond)
 			var partitionsLabel strings.Builder
 			for t, partitions := range r.blocks {
 				for p := range partitions {
@@ -905,10 +903,12 @@ func (b *Broker) responseReceiver(ctx context.Context) {
 					partitionsLabel.WriteString(fmt.Sprintf("%s-%d", t, p))
 				}
 			}
-			labels := pprof.Labels("fetch-partitions", partitionsLabel.String())
-			pprof.SetGoroutineLabels(pprof.WithLabels(ctx, labels))
-			labelsUpdated = true
+			labels = append(labels, "fetch-partitions", partitionsLabel.String())
 		}
+
+		labels = append(labels, "request-type", strings.TrimPrefix(fmt.Sprintf("%T", response.request.body), "*sarama."))
+		labels = append(labels, "request-queue-time", fmt.Sprint(queueTimeInMs))
+		pprof.SetGoroutineLabels(pprof.WithLabels(ctx, pprof.Labels(labels...)))
 
 		var headerLength = getHeaderLength(response.headerVersion)
 		header := make([]byte, headerLength)
