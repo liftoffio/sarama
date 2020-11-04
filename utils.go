@@ -53,9 +53,7 @@ func withBrokerLabels(ctx context.Context, broker *Broker, f func(context.Contex
 }
 
 func withPartitionLabels(ctx context.Context, topic string, partition int32, f func(context.Context)) {
-	labels := pprof.Labels(
-		"topic", topic,
-		"partition", fmt.Sprint(partition))
+	labels := pprof.Labels("partition", fmt.Sprintf("%s-%d", topic, partition))
 	pprof.Do(ctx, labels, f)
 }
 
