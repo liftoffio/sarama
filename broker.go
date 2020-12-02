@@ -1430,7 +1430,8 @@ func (b *Broker) updateRequestLatencyAndInFlightMetrics(req *request, requestLat
 			}
 		}
 
-		metric := fmt.Sprintf("%T.request-latency", req.body)
+		typeName := strings.Split(fmt.Sprintf("%T", req.body), ".")[1]
+		metric := strings.ToLower(typeName) + "-request-latency"
 		h := getOrRegisterHistogram(getMetricNameForBroker(metric, b), b.conf.MetricRegistry)
 		h.Update(requestLatencyInMs)
 	}
